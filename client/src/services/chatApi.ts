@@ -3,8 +3,14 @@
  */
 
 import { API_CONFIG, API_RESPONSE_TYPES } from '@/constants';
-import { formatApiUrl, safeJsonParse } from '@/utils';
+import { safeJsonParse } from '@/utils';
 import type { ApiResponse } from '@/types';
+
+export interface StreamCallbacks {
+  onData: (data: ApiResponse) => void;
+  onError: (message: string) => void;
+  onComplete: () => void;
+}
 
 export class ChatApiService {
   private static instance: ChatApiService;
@@ -19,34 +25,72 @@ export class ChatApiService {
   }
 
   /**
-   * Creates EventSource for streaming chat responses
-   * @param userInput - User's message
+   * Streams chat responses from the server using fetch with SSE parsing
+   * Uses POST so message length is not limited by URL constraints
+   * @param message - User's message
    * @param checkpointId - Optional checkpoint ID for conversation continuity
-   * @returns EventSource instance
+   * @param callbacks - Callbacks for stream events
+   * @returns AbortController to cancel the stream
    */
-  createChatStream(userInput: string, checkpointId?: string): EventSource {
-    const params: Record<string, string> = {};
-    
-    if (checkpointId) {
-      params.checkpoint_id = checkpointId;
+  async streamChat(
+    message: string,
+    checkpointId: string | null,
+    callbacks: StreamCallbacks
+  ): Promise<AbortController> {
+    const controller = new AbortController();
+
+    try {
+      const url = `${API_CONFIG.BASE_URL}${API_CONFIG.ENDPOINTS.CHAT_STREAM}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          checkpoint_id: checkpointId || undefined,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('data: ')) {
+            const jsonStr = trimmed.slice(6);
+            if (jsonStr) {
+              const data = safeJsonParse<ApiResponse>(jsonStr);
+              if (data && this.isValidResponseType(data)) {
+                callbacks.onData(data);
+              }
+            }
+          }
+        }
+      }
+
+      callbacks.onComplete();
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        return controller;
+      }
+      console.error('Stream error:', error);
+      callbacks.onError('Connection error occurred. Please try again.');
     }
 
-    const url = formatApiUrl(
-      API_CONFIG.BASE_URL,
-      `${API_CONFIG.ENDPOINTS.CHAT_STREAM}/${encodeURIComponent(userInput)}`,
-      Object.keys(params).length > 0 ? params : undefined
-    );
-
-    return new EventSource(url);
-  }
-
-  /**
-   * Parses API response data safely
-   * @param eventData - Raw event data from EventSource
-   * @returns Parsed API response or null
-   */
-  parseApiResponse(eventData: string): ApiResponse | null {
-    return safeJsonParse<ApiResponse>(eventData);
+    return controller;
   }
 
   /**
@@ -56,26 +100,6 @@ export class ChatApiService {
    */
   isValidResponseType(response: ApiResponse): boolean {
     return Object.values(API_RESPONSE_TYPES).includes(response.type as any);
-  }
-
-  /**
-   * Handles EventSource errors
-   * @param error - Error event
-   * @param onError - Error callback
-   */
-  handleStreamError(error: Event, onError: (message: string) => void): void {
-    console.error('EventSource error:', error);
-    onError('Connection error occurred. Please try again.');
-  }
-
-  /**
-   * Cleans up EventSource connection
-   * @param eventSource - EventSource to close
-   */
-  cleanup(eventSource: EventSource): void {
-    if (eventSource.readyState !== EventSource.CLOSED) {
-      eventSource.close();
-    }
   }
 }
 

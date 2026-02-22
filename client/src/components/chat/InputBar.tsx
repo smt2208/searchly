@@ -8,7 +8,8 @@ import type { InputBarProps } from '@/types';
 export const InputBar: React.FC<InputBarProps> = ({
   currentMessage,
   setCurrentMessage,
-  onSubmit
+  onSubmit,
+  isLoading = false
 }) => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setCurrentMessage(e.target.value);
@@ -32,10 +33,11 @@ export const InputBar: React.FC<InputBarProps> = ({
         {/* Text Input */}
         <input
           type="text"
-          placeholder="Type a message"
+          placeholder={isLoading ? "Waiting for response..." : "Type a message"}
           value={currentMessage}
           onChange={handleChange}
-          className="flex-1 bg-transparent border-none outline-none px-4 py-2 text-gray-800 placeholder-gray-500"
+          disabled={isLoading}
+          className="flex-1 bg-transparent border-none outline-none px-4 py-2 text-gray-800 placeholder-gray-500 disabled:opacity-50"
           autoComplete="off"
         />
 
@@ -53,7 +55,8 @@ export const InputBar: React.FC<InputBarProps> = ({
         {/* Send Button */}
         <button
           type="submit"
-          className="bg-gradient-to-r from-teal-500 to-teal-400 hover:from-teal-600 hover:to-teal-500 rounded-full p-3 ml-2 shadow-md hover:shadow-lg transition-all duration-200 group"
+          disabled={isLoading || !currentMessage.trim()}
+          className="bg-gradient-to-r from-teal-500 to-teal-400 hover:from-teal-600 hover:to-teal-500 rounded-full p-3 ml-2 shadow-md hover:shadow-lg transition-all duration-200 group disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:from-teal-500 disabled:hover:to-teal-400"
           aria-label="Send message"
         >
           <svg className="w-6 h-6 text-white transform rotate-45 group-hover:scale-110 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">

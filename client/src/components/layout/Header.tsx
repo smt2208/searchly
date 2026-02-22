@@ -1,5 +1,4 @@
 import React from 'react';
-import { FaSearch } from 'react-icons/fa';
 
 /**
  * Header Component - Top navigation bar for the Searchly application

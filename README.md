@@ -32,7 +32,7 @@ A modern AI search assistant that combines web search capabilities with intellig
 ## 📁 Project Structure
 
 ```
-Perplexity_2.0/
+Searchly/
 ├── client/                     # Frontend Next.js application
 │   ├── src/
 │   │   ├── app/               # Next.js app directory
@@ -40,10 +40,14 @@ Perplexity_2.0/
 │   │   │   ├── page.tsx       # Home page component
 │   │   │   └── globals.css    # Global styles
 │   │   ├── components/        # Reusable UI components
-│   │   │   ├── InputBar.tsx   # Search input component
 │   │   │   ├── chat/          # Chat-specific components
+│   │   │   │   ├── InputBar.tsx    # Search input component
+│   │   │   │   ├── MessageArea.tsx # Message display area
+│   │   │   │   └── SearchStages.tsx# Search progress display
 │   │   │   ├── layout/        # Layout components
+│   │   │   │   └── Header.tsx # App header
 │   │   │   └── ui/            # UI utility components
+│   │   │       └── TypingAnimation.tsx
 │   │   ├── hooks/             # Custom React hooks
 │   │   │   └── useChat.ts     # Chat state management
 │   │   ├── services/          # API service layer
@@ -57,8 +61,9 @@ Perplexity_2.0/
 └── server/                    # Backend Python application
     ├── app.py                 # Main FastAPI application
     ├── requirements.txt       # Python dependencies
-    ├── app_Tavily.ipynb      # Tavily API implementation (development)
-    └── app_Serper.ipynb      # Serper API implementation (development)
+    └── notebooks/             # Development notebooks
+        ├── app_Serper.ipynb   # Serper API implementation
+        └── app_Tavily.ipynb   # Tavily API implementation
 ```
 
 ## 🚦 Getting Started

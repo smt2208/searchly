@@ -49,6 +49,7 @@ export interface InputBarProps {
   currentMessage: string;
   setCurrentMessage: (message: string) => void;
   onSubmit: (e: React.FormEvent) => void;
+  isLoading?: boolean;
 }
 
 export interface SearchStagesProps {

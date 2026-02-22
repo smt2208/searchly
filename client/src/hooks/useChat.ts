@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { chatApiService } from '@/services/chatApi';
-import { generateMessageId, isValidMessage } from '@/utils';
+import { isValidMessage } from '@/utils';
 import { DEFAULT_MESSAGES, SEARCH_STAGES, API_RESPONSE_TYPES } from '@/constants';
 import type { Message, SearchInfo, ChatState, ApiResponse } from '@/types';
 
@@ -24,6 +24,8 @@ export const useChat = () => {
   });
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Use a ref counter for message IDs to avoid stale closure issues
+  const nextMessageIdRef = useRef(2); // Start after welcome message (id: 1)
 
   // Auto-scroll to bottom when new messages are added
   useEffect(() => {
@@ -51,9 +53,17 @@ export const useChat = () => {
     }));
   }, []);
 
+  const setIsLoading = useCallback((loading: boolean) => {
+    setChatState(prev => ({
+      ...prev,
+      isLoading: loading
+    }));
+  }, []);
+
   const addUserMessage = useCallback((content: string): number => {
-    const newMessageId = generateMessageId(chatState.messages);
-    
+    const newMessageId = nextMessageIdRef.current;
+    nextMessageIdRef.current += 2; // Reserve next ID for AI response
+
     updateMessages(prev => [
       ...prev,
       {
@@ -65,7 +75,7 @@ export const useChat = () => {
     ]);
 
     return newMessageId;
-  }, [chatState.messages, updateMessages]);
+  }, [updateMessages]);
 
   const addAiPlaceholder = useCallback((id: number) => {
     updateMessages(prev => [
@@ -135,10 +145,10 @@ export const useChat = () => {
         break;
 
       case API_RESPONSE_TYPES.SEARCH_RESULTS:
-        if (data.urls && searchData.current) {
-          const urls = typeof data.urls === 'string' 
-            ? JSON.parse(data.urls) 
-            : data.urls;
+        if (searchData.current) {
+          const urls = data.urls
+            ? (typeof data.urls === 'string' ? JSON.parse(data.urls) : data.urls)
+            : [];
           
           const newSearchInfo: SearchInfo = {
             ...searchData.current,
@@ -184,68 +194,61 @@ export const useChat = () => {
   const sendMessage = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!isValidMessage(chatState.currentMessage)) {
+    if (!isValidMessage(chatState.currentMessage) || chatState.isLoading) {
       return;
     }
 
     const userInput = chatState.currentMessage;
     const newMessageId = addUserMessage(userInput);
     setCurrentMessage('');
+    setIsLoading(true);
 
     const aiResponseId = newMessageId + 1;
     addAiPlaceholder(aiResponseId);
 
+    const streamedContent = { current: '' };
+    const searchData = { current: null as SearchInfo | null };
+
     try {
-      const eventSource = chatApiService.createChatStream(
-        userInput, 
-        chatState.checkpointId || undefined
-      );
-
-      const streamedContent = { current: '' };
-      const searchData = { current: null as SearchInfo | null };
-
-      eventSource.onmessage = (event) => {
-        try {
-          const data = chatApiService.parseApiResponse(event.data);
-          if (data && chatApiService.isValidResponseType(data)) {
+      await chatApiService.streamChat(
+        userInput,
+        chatState.checkpointId,
+        {
+          onData: (data) => {
             handleApiResponse(data, aiResponseId, streamedContent, searchData);
+          },
+          onError: (errorMessage) => {
+            if (!streamedContent.current) {
+              updateAiMessage(aiResponseId, {
+                content: errorMessage,
+                isLoading: false
+              });
+            }
+            setIsLoading(false);
+          },
+          onComplete: () => {
+            setIsLoading(false);
           }
-        } catch (error) {
-          console.error('Error parsing event data:', error);
         }
-      };
-
-      eventSource.onerror = (error) => {
-        chatApiService.handleStreamError(error, (errorMessage) => {
-          if (!streamedContent.current) {
-            updateAiMessage(aiResponseId, {
-              content: errorMessage,
-              isLoading: false
-            });
-          }
-        });
-        chatApiService.cleanup(eventSource);
-      };
-
-      eventSource.addEventListener('end', () => {
-        chatApiService.cleanup(eventSource);
-      });
-
+      );
     } catch (error) {
-      console.error('Error setting up EventSource:', error);
+      console.error('Error setting up stream:', error);
       updateAiMessage(aiResponseId, {
         content: DEFAULT_MESSAGES.CONNECTION_ERROR,
         isLoading: false
       });
+      setIsLoading(false);
     }
   }, [
     chatState.currentMessage,
     chatState.checkpointId,
+    chatState.isLoading,
     addUserMessage,
     addAiPlaceholder,
     handleApiResponse,
     updateAiMessage,
-    setCurrentMessage
+    setCurrentMessage,
+    setIsLoading
   ]);
 
   return {

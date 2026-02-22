@@ -54,7 +54,7 @@ const geistMono = Geist_Mono({
  * - Social media previews
  * - Bookmark descriptions
  * 
- * Note: This should be updated with actual Perplexity 2.0 branding
+ * Searchly application metadata
  */
 export const metadata = {
   title: 'Searchly',

@@ -32,7 +32,8 @@ const Home: React.FC = () => {
         <InputBar 
           currentMessage={currentMessage} 
           setCurrentMessage={setCurrentMessage} 
-          onSubmit={sendMessage} 
+          onSubmit={sendMessage}
+          isLoading={isLoading}
         />
       </div>
     </div>

@@ -3,12 +3,16 @@ from typing import TypedDict, Annotated, Optional
 from langgraph.graph import add_messages, StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessageChunk, ToolMessage
+from langchain_core.tools import tool as tool_decorator
+from langchain_community.utilities import GoogleSerperAPIWrapper
 from dotenv import load_dotenv
-from langchain_community.agent_toolkits.load_tools import load_tools
-from fastapi import FastAPI, Query
+from pydantic import BaseModel
+from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
+import os
+import asyncio
 from uuid import uuid4
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 import aiosqlite
@@ -24,9 +28,16 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]  # List of messages with automatic message aggregation
 
 # Initialize search tools and language model components
-# Load Google Serper API tool for web search functionality
-search_tools = load_tools(["google-serper"])
-tools = search_tools
+# Set up Google Serper API wrapper for web search with structured results
+serper_wrapper = GoogleSerperAPIWrapper()
+
+@tool_decorator
+def google_serper(query: str) -> str:
+    """Search the web using Google. Use this to find current, up-to-date information about any topic."""
+    results = serper_wrapper.results(query)
+    return json.dumps(results)
+
+tools = [google_serper]
 
 # Initialize OpenAI ChatGPT model with GPT-4o-mini for cost-effective performance
 llm = ChatOpenAI(model="gpt-4o-mini")
@@ -75,9 +86,10 @@ async def tool_node(state):
         
         # Handle Google Serper search tool specifically
         if tool_name == "google_serper":
-            search_results = await search_tools[0].ainvoke(tool_args)
+            query = tool_args.get("query", "")
+            search_results = await asyncio.to_thread(serper_wrapper.results, query)
             tool_message = ToolMessage(
-                content=str(search_results),
+                content=json.dumps(search_results),
                 tool_call_id=tool_id,
                 name=tool_name
             )
@@ -102,23 +114,9 @@ graph_builder.add_conditional_edges("model", tools_router)
 # Add direct edge from tool_node back to model for processing tool results
 graph_builder.add_edge("tool_node", "model")
 
-# Async setup function to initialize persistent memory and compile the graph
-async def setup():
-    """
-    Initialize the conversation graph with persistent memory storage.
-    Creates an SQLite database connection for storing conversation checkpoints,
-    allowing conversations to be resumed across sessions.
-    """
-    # Create async SQLite connection for conversation persistence
-    async_conn = await aiosqlite.connect("checkpoint.sqlite")
-    memory = AsyncSqliteSaver(async_conn)
-    
-    # Compile the graph with checkpoint functionality for conversation persistence
-    graph = graph_builder.compile(checkpointer=memory)
-    return graph
-
-# Global variable to hold the compiled graph instance
+# Global variables to hold the compiled graph instance and database connection
 graph = None
+async_conn = None
 
 # Lifespan event handler for FastAPI application startup and shutdown
 @asynccontextmanager
@@ -126,18 +124,21 @@ async def lifespan(app: FastAPI):
     """
     Manages the application lifecycle, ensuring proper initialization and cleanup.
     Startup: Initializes the graph with persistent memory
-    Shutdown: Handles cleanup if needed (database connections, etc.)
+    Shutdown: Closes database connections
     """
-    # Startup phase - initialize the graph
-    global graph
-    graph = await setup()
+    global graph, async_conn
+    # Startup phase - initialize the graph with persistent memory
+    async_conn = await aiosqlite.connect("checkpoint.sqlite")
+    memory = AsyncSqliteSaver(async_conn)
+    graph = graph_builder.compile(checkpointer=memory)
     yield   # ⚡ APPLICATION RUNS HERE - FastAPI serves requests
-    # Shutdown phase - cleanup resources if needed
-    pass
+    # Shutdown phase - close database connection
+    if async_conn:
+        await async_conn.close()
 
 # Initialize FastAPI application with comprehensive configuration
 app = FastAPI(
-    title="Perplexity 2.0 API",
+    title="Searchly API",
     description="A FastAPI server with LangGraph for chat interactions and web search capabilities",
     version="1.0.0",
     docs_url="/docs",        # Swagger UI documentation endpoint
@@ -146,10 +147,11 @@ app = FastAPI(
 )
 
 # Configure CORS middleware for cross-origin requests
-# This allows the API to be accessed from different domains (important for web frontends)
+# Origins can be configured via CORS_ORIGINS environment variable (comma-separated)
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # Allow all origins (restrict in production)
+    allow_origins=cors_origins,  # Configured via environment variable
     allow_credentials=True,     # Allow credentials in requests
     allow_methods=["*"],        # Allow all HTTP methods
     allow_headers=["*"],        # Allow all headers
@@ -193,88 +195,106 @@ async def generate_chat_responses(message: str, checkpoint_id: Optional[str] = N
     """
     # Ensure the graph is properly initialized
     if graph is None:
-        raise RuntimeError("Graph is not initialized. Please wait for the application to start.")
+        yield f"data: {json.dumps({'type': 'error', 'error': 'Server not ready. Please try again.'})}"
+        yield f"data: {json.dumps({'type': 'end'})}\n\n"
+        return
     
     # Determine if this is a new conversation or continuation
     is_new_conversation = checkpoint_id is None
     
-    if is_new_conversation:
-        # Create new conversation with unique checkpoint ID
-        new_checkpoint_id = str(uuid4())
-        config = {"configurable": {"thread_id": new_checkpoint_id}}
-        
-        # Stream events for new conversation
-        events = graph.astream_events(
-            {"messages": [HumanMessage(content=message)]},
-            version="v2",
-            config=config
-        )
-        
-        # Send checkpoint ID to client for future conversation continuation
-        checkpoint_data = {"type": "checkpoint", "checkpoint_id": new_checkpoint_id}
-        yield f"data: {json.dumps(checkpoint_data)}\n\n"
-    else:
-        # Continue existing conversation using provided checkpoint ID
-        config = {"configurable": {"thread_id": checkpoint_id}}
-        events = graph.astream_events(
-            {"messages": [HumanMessage(content=message)]},
-            version="v2",
-            config=config
-        )
+    try:
+        if is_new_conversation:
+            # Create new conversation with unique checkpoint ID
+            new_checkpoint_id = str(uuid4())
+            config = {"configurable": {"thread_id": new_checkpoint_id}}
+            
+            # Stream events for new conversation
+            events = graph.astream_events(
+                {"messages": [HumanMessage(content=message)]},
+                version="v2",
+                config=config
+            )
+            
+            # Send checkpoint ID to client for future conversation continuation
+            checkpoint_data = {"type": "checkpoint", "checkpoint_id": new_checkpoint_id}
+            yield f"data: {json.dumps(checkpoint_data)}\n\n"
+        else:
+            # Continue existing conversation using provided checkpoint ID
+            config = {"configurable": {"thread_id": checkpoint_id}}
+            events = graph.astream_events(
+                {"messages": [HumanMessage(content=message)]},
+                version="v2",
+                config=config
+            )
 
-    # Process and stream events from the LangGraph execution
-    async for event in events:
-        event_type = event["event"]
-        
-        # Handle streaming content from the language model
-        if event_type == "on_chat_model_stream":
-            chunk_content = serialise_ai_message_chunk(event["data"]["chunk"])
-            content_data = {"type": "content", "content": chunk_content}
-            yield f"data: {json.dumps(content_data)}\n\n"
+        # Process and stream events from the LangGraph execution
+        async for event in events:
+            event_type = event["event"]
             
-        # Handle completion of model response and potential tool calls
-        elif event_type == "on_chat_model_end":
-            # Extract tool calls from the model output
-            tool_calls = event["data"]["output"].tool_calls if hasattr(event["data"]["output"], "tool_calls") else []
-            
-            # Filter for Google Serper search tool calls
-            search_calls = [call for call in tool_calls if call["name"] == "google_serper"]
-            
-            if search_calls:
-                # Extract search query and notify client that search is starting
-                search_query = search_calls[0]["args"].get("query", "")
-                search_data = {"type": "search_start", "query": search_query}
-                yield f"data: {json.dumps(search_data)}\n\n"
+            # Handle streaming content from the language model
+            if event_type == "on_chat_model_stream":
+                chunk_content = serialise_ai_message_chunk(event["data"]["chunk"])
+                content_data = {"type": "content", "content": chunk_content}
+                yield f"data: {json.dumps(content_data)}\n\n"
                 
-        # Handle completion of tool execution (search results)
-        elif event_type == "on_tool_end" and event["name"] == "google_serper":
-            output = event["data"]["output"]
-            
-            # Extract URLs from search results if available
-            if isinstance(output, list):
-                urls = [item["url"] for item in output if isinstance(item, dict) and "url" in item]
+            # Handle completion of model response and potential tool calls
+            elif event_type == "on_chat_model_end":
+                # Extract tool calls from the model output
+                tool_calls = event["data"]["output"].tool_calls if hasattr(event["data"]["output"], "tool_calls") else []
+                
+                # Filter for Google Serper search tool calls
+                search_calls = [call for call in tool_calls if call["name"] == "google_serper"]
+                
+                if search_calls:
+                    # Extract search query and notify client that search is starting
+                    search_query = search_calls[0]["args"].get("query", "")
+                    search_data = {"type": "search_start", "query": search_query}
+                    yield f"data: {json.dumps(search_data)}\n\n"
+                    
+            # Handle completion of tool execution (search results)
+            elif event_type == "on_tool_end" and event["name"] == "google_serper":
+                output = event["data"]["output"]
+                
+                # Extract URLs from search results (handles both string JSON and dict formats)
+                urls = []
+                try:
+                    parsed = json.loads(output) if isinstance(output, str) else output
+                    if isinstance(parsed, dict) and "organic" in parsed:
+                        urls = [item["link"] for item in parsed["organic"] if isinstance(item, dict) and "link" in item][:8]
+                    elif isinstance(parsed, list):
+                        urls = [item.get("link") or item.get("url", "") for item in parsed if isinstance(item, dict)][:8]
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
                 search_results_data = {"type": "search_results", "urls": urls}
                 yield f"data: {json.dumps(search_results_data)}\n\n"
     
-    # Signal end of conversation processing
+    except Exception as e:
+        error_data = {"type": "error", "error": f"An error occurred: {str(e)}"}
+        yield f"data: {json.dumps(error_data)}\n\n"
+    
+    # Always signal end of conversation processing
     end_data = {"type": "end"}
     yield f"data: {json.dumps(end_data)}\n\n"
 
+# Request model for chat endpoint
+class ChatRequest(BaseModel):
+    message: str
+    checkpoint_id: Optional[str] = None
+
 # Define API endpoints
-@app.get("/chat_stream/{message}")
-async def chat_stream(message: str, checkpoint_id: Optional[str] = Query(None)):
+@app.post("/chat_stream")
+async def chat_stream(request: ChatRequest):
     """
     Main chat endpoint that handles streaming conversations.
     
     Args:
-        message: The user's message to process
-        checkpoint_id: Optional conversation ID for continuing existing chats
+        request: ChatRequest containing the user's message and optional checkpoint ID
     
     Returns:
         StreamingResponse: Server-Sent Events stream containing conversation data
     """
     return StreamingResponse(
-        generate_chat_responses(message, checkpoint_id),
+        generate_chat_responses(request.message, request.checkpoint_id),
         media_type="text/event-stream"
     )
 
@@ -283,7 +303,7 @@ async def root():
     """
     Root endpoint providing basic API information and documentation links.
     """
-    return {"message": "Welcome to Perplexity 2.0 API", "docs": "/docs"}
+    return {"message": "Welcome to Searchly API", "docs": "/docs"}
 
 # Application entry point for direct execution
 if __name__ == "__main__":
